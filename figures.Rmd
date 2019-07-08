@@ -1,0 +1,685 @@
+---
+title: "Label-free machine learning analysis of patient-derived tumor organoid drug response"
+author: "Nolan Ung, Naim Matasci"
+date: "07/08/2019"
+always_allow_html: yes
+output:
+  html_document:
+    highligh: haddock
+    keep_md: yes
+    number_sections: yes
+    theme: paper
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+  html_notebook:
+    highligh: haddock
+    number_sections: yes
+    theme: paper
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+  pdf_document: default
+---
+
+## MANUALLY RUN THIS FIRST
+Run on `r date()`
+```{r checkpoint, eval=FALSE, warning=FALSE, include=FALSE}
+### *** IMPORTANT *** ###
+#This chunck must be run MANUALLY before attempting to knit this document
+#This document uses the package checkpoint for package versioning and ensuring reproducibility
+#After manually running the checkpoint command the documents can be knit using RStudio
+
+library(checkpoint)
+checkpoint("2018-11-27")
+
+```
+
+# Setup
+```{r setup, include=FALSE}
+dev.off()
+knitr::opts_chunk$set(echo = TRUE)
+source("functions.R")
+input_folder<-file.path(here::here(), "data")
+```
+
+# Plotting options
+```{r global_plotting_opts, include=FALSE}
+Compound_cols = c(
+  Media = "hotpink1",
+  OXA = "gold2",
+  IRI = "mediumpurple3",
+  STA = "turquoise3"
+  )
+
+LD_cols = c(Live = "gray80", Dead = "gray25")
+  
+Patient_cols = c(
+  `12415` = "yellow3",
+  `12527` = "turquoise1",
+  `12620` = "tomato",
+  `12737` = "purple",
+  `12911` = "blue",
+  `13154` = "chartreuse4",
+  `12620_A` = "tomato",
+  `12620_B` = "dodgerblue",
+  `12415_A` = "yellow3",
+  `12415_B` = "orange"
+  )
+```
+
+#Load input
+```{r load_input, echo=TRUE, include=FALSE}
+#Load and clean the input
+big_tbl <- clean_input(import_all(file.path(input_folder, "raw")))
+big_tbl<- big_tbl %>% mutate(`Row`=paste(`Row`,ExpID,sep="_")) #Ensuring that all the measurements are kept separated
+#names(big_tbl) <- make.names(names(big_tbl))
+
+#GT Organoid classification by experts
+org_class <- read_csv(file.path(input_folder,"ground_truth", "Organoid_Classification_Responses.csv"))
+
+#GT Vital Dye measurements
+gt_i<-import_wb(file.path(input_folder,"ground_truth","20171010_20171017_12620_GT.xlsx"))
+gt_i<-gt_i %>% mutate(UID=paste(Row,Column,Field,`Object No in Organoids`,Day,sep='.'))
+
+#GT Imaging measurements
+gt_n<-import_wb(file.path(input_folder,"ground_truth","20171010_20171017_12620_GT_DRAQ7.xlsx"))
+gt_n<-gt_n %>% mutate(UID=paste(Row,Column,Field,`(DRAQ7) - Object No in Organoids`,Day,sep='.'))
+ 
+
+#Cell Titer Glo
+ctg_1 <- plater::read_plate(
+  file = file.path(input_folder,"ground_truth","20170526_12737_IRI_Curve_D3_ES.csv" ),
+  well_ids_column = "Wells"     # name to give column of well IDs (optional)
+)
+ctg_2 <- plater::read_plate(
+  file = file.path(input_folder,"ground_truth","20170530_12737_IRI_Curve_CTG_D7_ES.csv" ),
+  well_ids_column = "Wells"     # name to give column of well IDs (optional)
+)
+
+ctg_3 <-plater::read_plate(
+  file = file.path(input_folder,"ground_truth","20170609_12737_IRI_Curve2_D3_ES.csv" ),
+  well_ids_column = "Wells"     # name to give column of well IDs (optional)
+)
+
+ctg_4<-plater::read_plate(
+  file = file.path(input_folder,"ground_truth","20170613_12737_IRI_Curve2_D7_ES.csv" ),
+  well_ids_column = "Wells"     # name to give column of well IDs (optional)
+)
+
+
+# Tracked organoids
+tracked_organoids <- read.csv(file.path(input_folder, "ground_truth",  "20180122_13154_GT_Tracked-Nulcei_INT.csv"), 
+                      stringsAsFactors = FALSE, 
+                      encoding = "latin1")
+
+```
+
+# Fig 2B - Heatmap of organoids in media
+```{r fig2_b, echo=FALSE, message=FALSE, warning=FALSE, fig.height=11, fig.width=14}
+ann_colors <- list(
+  LD = LD_cols, 
+  Compound = Compound_cols[c("Media","STA")], 
+  Patient = Patient_cols[c(  "12415" ,  "12527","12620","12737", "12911","13154" )]
+)
+
+mlt_big_tbl_media <-  big_tbl %>%
+  melt(
+  id.vars = c(
+  "Display",
+  "Row",
+  "Compound",
+  "Concentration",
+  "Cell Type",
+  "LD",
+  "Day",
+  "ExpID"
+  )
+  )  %>%
+  filter(grepl("Region|Object", variable)) %>%
+  filter(Compound == "Media")
+
+map_media_l <- make_map_pdr(fix_vars2(mlt_big_tbl_media))
+
+pheatmap(mat = map_media_l$mat, 
+         scale = "row",
+         cluster_rows = TRUE,
+         border_color = NA,
+         annotation_col  = map_media_l$annot, 
+         annotation_colors = ann_colors,
+         main = '',
+         show_colnames = FALSE)
+```
+
+#Fig 2C - Organoid growth
+```{r fig2c, echo=FALSE, message=FALSE, warning=FALSE, fig.height=5, fig.width=7}
+
+all_tbl <-
+  big_tbl %>% filter(ExpID != "20171012_12415_OXA_2016905_0913" ,
+  ExpID != "20181003_12620_IRI_DC")
+  
+  feature <- "Region Area [µm²]"
+  subdata <-
+  subset_measurements(all_tbl, feature = feature, missing_as_zero = FALSE)
+  
+  a_curves <-
+  subdata %>% mutate(Patient =  `Cell Type`) %>% filter(Compound ==
+  "Media") %>% group_by(Patient, Compound, Concentration, Day) %>%    summarise(
+  N_wells = sum(!is.na(Live)),
+  live_mean = mean(Live, na.rm = TRUE),
+  live_sd = sd(Live, na.rm = TRUE)
+  )
+  
+  pd <- position_identity()
+  days <- sort(as.numeric(unique(a_curves$Day)))
+  
+  pl <- ggplot(data = a_curves) +
+  aes(x = Day,
+  y = live_mean,
+  col = Patient) +
+  geom_line(lwd = 1) +
+  scale_color_manual(values = Patient_cols[c("12415", "12527", "12620", "12737", "12911", "13154")]) +
+  
+  scale_x_continuous(breaks = days) +
+  ylab(label = feature) +
+  labs(title = "") +
+  theme_linedraw()
+  
+  plot(pl)
+```
+
+#Fig 3A - Expert Ground Truth
+```{r Expert_ground_truth, echo=FALSE, message=FALSE,  warning=FALSE, fig.height=5, fig.width=7}
+# melt and make variables factors 
+org_melt <-
+  org_class %>% melt(id.vars = c("Timestamp", "Email Address", "Group"))
+  
+  org_melt$Group <-
+  ordered(
+  org_melt$Group,
+  levels = c("experimental", "Harmony", "DRAQ7"),
+  labels = c("Experts", "Harmony", "DRAQ7")
+  )
+  
+  
+  names(org_class) <-
+  make.names(names = names(org_class)) %>% str_replace_all(pattern = "^.*\\.\\.|X\\.|\\.$", replacement = "")
+  
+  majority <-
+  lapply(org_class, function(x)
+  names(which.max(table(x)))) %>%  as.data.frame() %>%
+  mutate(Email.Address = "Majority@stat.com", Group = "Majority")
+  
+  melt_major <-
+  org_class %>% full_join(majority) %>%  melt(id.vars = c("Timestamp", "Email.Address", "Group"))
+  melt_major$Group <-
+  ordered(
+  melt_major$Group,
+  levels = c("experimental", "Majority",  "Harmony", "DRAQ7"),
+  labels = c("Experts", "Majority",  "ML", "DRAQ7")
+  )
+  
+  melt_major$variable <- factor(
+  melt_major$variable,
+  levels = c(
+  "A.15",
+  "A.19",
+  "C.41",
+  "D.48",
+  "F.29",
+  "A.22",
+  "A.17",
+  "B.44",
+  "E.49",
+  "C.8",
+  "D.82",
+  "F.53",
+  "D.12",
+  "B.22",
+  "E.82",
+  "C.43",
+  "F.59",
+  "E.12"
+  ),
+  labels = c(
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+  "9",
+  "10",
+  "11",
+  "12",
+  "13",
+  "14",
+  "15",
+  "16",
+  "17",
+  "18"
+  )
+  )
+  
+  
+  G <-  ggp(melt_major, aes(x = variable, fill = value))
+  G + geom_bar(stat = "count",
+  position = "stack",
+  width = .95)  +
+  labs(title = "Expert Ground Truth for Organoid Viability", x = "Organoid ID") + facet_grid(Group ~
+  ., scales = "free_y") +
+  geom_hline(
+  data = data.frame(yint = 4.5, Group = "Experts"),
+  aes(yintercept = yint),
+  linetype = "solid",
+  color = "black"
+  ) +
+  theme(legend.title = element_blank()) + scale_y_continuous(breaks = c(1, 3, 5, 7, 9)) +
+  scale_fill_manual(values = c("#FAA43A", "#5DA5DA"))
+
+  
+```
+
+#Fig 3B - Comparison between VitalDye and ML
+```{r comp_ML_VD, echo=FALSE, message=FALSE,  warning=FALSE, fig.height=5, fig.width=7}
+#Remove cases where multiple objects map to the same organoid in image
+en_b<-nrow(gt_n)
+gt_n <- gt_n %>% group_by(UID) %>% filter(n()==1)
+
+if((en_b-nrow(gt_n))>0){warning(paste("Removed",removed, "duplicate entries out of",en_b,"total" ))}
+
+n_suffix<-'_VD'
+i_suffix='_Imaging'
+
+gt_r<-unify(gt_n,gt_i,n_suffix,i_suffix)
+gt_r<-restack(gt_r,'LD',n_suffix,i_suffix)
+
+subdata<-subset_measurements(gt_r,'counts')
+nuc_counts<-normalize_data(subdata,metric="proportion")
+cm<-matrix(unlist(strsplit(nuc_counts$Compound,'_')),ncol=2,byrow=T)
+nuc_counts$Compound<-cm[,1]
+nuc_counts$Assay<-cm[,2]
+nuc_counts[nuc_counts$Compound=="media","Compound"]<-"Media"
+nuc_counts[nuc_counts$Assay=="Imaging","Assay"]<-"ML"
+
+i_aes<-list(cols=c('black','black','red','red'),shapes=c(0,0,1,1),lines=c(0,0,1,1))
+
+plot(plot_c_curves(nuc_counts,'counts',patient="12620",error_bars = F,normalized = T,metric='proportion')+ theme(axis.text = element_text(size = 15)))
+```
+
+#Fig 3C - IRI dose response
+```{r iri_dr , echo=FALSE, message=FALSE,  warning=FALSE, fig.height=5, fig.width=7}
+subdata<-subset_measurements(big_tbl %>% filter(ExpID == '20181012_20170530_12737_IRI'),feature="counts",missing_as_zero = TRUE)
+subdata<-make_treatments(subdata)
+#subdata %>% group_by(`Cell Type`, Compound, Concentration,Day) %>% filter(`Cell Type`==12415) %>% summarise(n()) %>% View()
+
+
+norm_counts<-normalize_data(subdata)
+
+n737<-norm_counts %>% filter (`Cell Type` ==12737)
+
+plot(plot_curves(n737,pat="12737",feature="counts",error_bars = T,normalized = T,metric="proportion"))
+
+```
+
+#Fig 3D - CTG Drug response
+```{r CellTiter-Glo_plot_12737-1, message=FALSE, echo=FALSE, warning=FALSE,  fig.height=5, fig.width=7}
+
+
+#calculate average value of ATP = 0 background control and subract from all values
+avg_ATP1 <- ctg_1 %>% filter(Compound == 'ATP' & Concentration == 0)  %>% select(Signal) %>% summarise(mean=mean(Signal,na.rm=TRUE))
+day_data1 <- ctg_1 %>% mutate(Day = factor(3)) %>% mutate(Signal = Signal - avg_ATP1$mean) %>% filter(!Concentration == .25 | is.na(Concentration))
+day_data1$Compound[day_data1$Compound == "media"] <-  "Media"
+
+#calculate average value of ATP = 0 background control and subract from all values
+avg_ATP2 <- ctg_2 %>% filter(Compound == 'ATP' & Concentration == 0)  %>% select(Signal) %>% summarise(mean=mean(Signal,na.rm=TRUE))
+day_data2 <- ctg_2 %>% mutate(Day = factor(7)) %>% mutate(Signal = Signal - avg_ATP2$mean)
+day_data2$Compound[day_data2$Compound == "media"] <-  "Media"
+
+#combine all plates into one DF and filter only relevant Conditions
+ctg_data <- rbind(day_data1, day_data2)
+
+ctg_data <- ctg_data %>%  
+    filter(Compound != "ATP") %>% 
+  group_by(Compound, Concentration, Day) %>% 
+  dplyr::summarise(mean = mean(Signal), sd = sd(Signal)) 
+
+#normalize by media values each day
+norm_temp <-  ctg_data %>% group_by(Compound, Day) %>% 
+  dplyr::summarise(mean = mean(mean)) %>% filter(Compound == "Media")
+
+
+ctg_data <- ctg_data %>% mutate(norm_mean = ifelse(Day == "3", mean/as.numeric(norm_temp[1,3]), ifelse(Day == "7", mean/as.numeric(norm_temp[2,3]), NA))) %>% mutate(norm_sd = ifelse(Day == "3", sd/as.numeric(norm_temp[1,3]), ifelse(Day == "7", sd/as.numeric(norm_temp[2,3]), NA)))
+
+
+#arrage colors and order of Conditions
+ctg_data$Compound <- factor(ctg_data$Compound, levels = c("STA", "IRI", "Media",  "NOC"))
+ctg_data$Concentration <- factor(ctg_data$Concentration)
+ctg_data <- make_treatments(ctg_data)
+
+# make aesthetics
+cols <- make_aes(ctg_data)$cols
+shapes <- make_aes(ctg_data)$shapes
+shapek <- c(0:(length(shapes)-1))
+
+#calculate min and max for sd bars
+miny <- ctg_data$norm_mean - ctg_data$norm_sd
+maxy <- ctg_data$norm_mean + ctg_data$norm_sd
+
+dodge <- position_dodge(.8)
+
+G <- ggp(ctg_data, aes(x = Day, y = norm_mean, fill = Treatment, 
+                            group = Treatment,
+                            ymin = miny, ymax = maxy, 
+                         shape = Compound))
+G +  geom_bar(stat = "identity", position  = dodge) + 
+  geom_errorbar(width = .3, position = dodge, size = 1) +
+  scale_fill_manual(values = cols,  name = "Condition") + 
+  scale_x_discrete(breaks=c("3", "7"), 
+                   labels=c("3", "7")) +  scale_y_continuous(limits = c(0,2)) +
+  labs(title = "", y = "Mean Signal", x = "Day") +
+    scale_shape_manual(values = shapes, guide = FALSE) +
+    guides(colour = guide_legend(override.aes = list(shape = shapes))) +
+  geom_hline(yintercept = 1, linetype = "dashed", alpha = .5) +
+  ylim(0,1.5)
+  
+```
+
+#Fig 4 - Live/dead PDOs based on morphology and texture
+```{r heatmap_ld, , message=FALSE, echo=FALSE, warning=FALSE,  fig.height=11, fig.width=14}
+#### Combine live and dead, Media and STA #####
+mlt_big_L_all <-  big_tbl %>%  filter(LD == "Live") %>% melt(id.vars = c("Display", "Row", "Compound", "Concentration", "Cell Type", "LD", "Day", "ExpID"))  %>% filter(grepl("Region|Object", variable)) %>% filter(Compound %in% c("Media", "STA")) 
+
+mlt_big_L_all <- fix_vars2(mlt_big_L_all)
+
+mlt_big_D_all <-  big_tbl %>%  filter(LD == "Dead") %>%  melt(id.vars = c("Display", "Row", "Compound", "Concentration", "Cell Type", "LD", "Day", "ExpID"))  %>% filter(grepl("Region|Object", variable)) %>% filter(Compound %in% c("Media", "STA"))
+
+mlt_big_D_all <- fix_vars2(mlt_big_D_all)
+
+big_map_all <- bind_rows(mlt_big_D_all, mlt_big_L_all) %>% 
+  group_by(ExpID, LD, Compound, Patient, Day, variable) %>% 
+  dplyr::summarise(mean_val = mean(value)) %>% 
+  spread(variable, mean_val) %>% ungroup() %>% 
+  unite(Patient, Day, ExpID, Compound, LD, col = P_D_C_LD_ID, remove = FALSE)
+
+mat_all <- big_map_all %>% column_to_rownames("P_D_C_LD_ID") %>% dplyr::select(-Patient, -Day, -ExpID,  -Compound, -LD) %>%
+  as.matrix() %>% t()
+
+
+annot <- big_map_all %>%  column_to_rownames("P_D_C_LD_ID") %>% dplyr::select(Patient, LD) %>% as.data.frame()
+
+ann_colors_drug <- list(
+  LD = LD_cols, 
+  Patient = Patient_cols[c(  "12415" ,  "12527","12620","12737", "12911","13154" )]
+)
+
+pheatmap(mat = mat_all, scale = "row", 
+         cluster_rows = TRUE, 
+         border_color = NA,
+         annotation_col  = annot,
+         annotation_colors = ann_colors_drug,
+#         main = "Live and Dead PDOs Media and STA treated"
+         main = '',
+         show_colnames = FALSE)
+         
+```
+
+
+#Fig 5A - Response curves
+```{r load_data, message=FALSE, echo=FALSE, warning=FALSE,  fig.height=5, fig.width=7}
+feature<-"counts"
+subdata<-subset_measurements(big_tbl,feature=feature,missing_as_zero = TRUE)
+subdata<-make_treatments(subdata)
+
+
+subdata<-subdata %>% filter( 
+  (Compound == "IRI" & Concentration == 20)   |
+  (Compound == "IRI" & Concentration == 40)   |
+  (Compound == "OXA" & Concentration == 20)   |
+    (Compound == "STA")   |
+    (Compound == "Media") 
+)
+
+norm_counts<-normalize_data(subdata)
+
+plot(plot_curves(norm_counts %>% filter (`Cell Type` ==12415) %>% ungroup() %>% mutate(`Cell Type`=paste(`Cell Type`,"(Primary)")),pat="12415",feature=feature,error_bars = T,normalized = T,metric="proportion" ))
+
+plot(plot_curves(norm_counts %>% filter (`Cell Type` ==12527)%>% ungroup() %>% mutate(`Cell Type`=paste(`Cell Type`,"(Metastasis)")),pat="12527",feature=feature,error_bars = T,normalized = T,metric="proportion"))
+
+plot(plot_curves(norm_counts %>% filter (`Cell Type` ==12911)%>% ungroup() %>% mutate(`Cell Type`=paste(`Cell Type`,"(Primary)")),pat="12911",feature=feature,error_bars = T,normalized = T,metric="proportion"))
+
+```
+
+#Fig 5B - Dead PDO Features
+```{r, message=FALSE, echo=FALSE, warning=FALSE,  fig.height=5, fig.width=14}
+drug_ann_colors<-list(Compound=Compound_cols)
+
+drug_tbl <- big_tbl %>% melt(id.vars = c("Display", "Row", "Compound", "Concentration", "Cell Type", "LD", "Day", "ExpID"))  %>% filter(grepl("Region|Object", variable)) %>%
+ 
+  filter((Compound == "OXA" & Concentration == 20) | (Compound == "IRI" & Concentration %in% c(20)) | Compound == "Media" | Compound == "STA" | Compound == "STA 5", Day != 0 ) 
+
+drug_tbl_clean <-fix_vars2(drug_tbl)
+
+drug_l_12415=make_map_pdcc_ld(drug_tbl_clean  %>%  filter(ExpID %in% c( "20181109_20161025_1107_12415", "20171012_12415_OXA_2016905_0913"))  ,"Dead")
+
+
+pheatmap(mat = drug_l_12415$mat, 
+         color = viridis(100), 
+         fontsize = 14, 
+         labels_col = "",
+         scale = "none",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         border_color = NA,
+         annotation_col  = drug_l_12415$annot,
+         annotation_colors = drug_ann_colors,
+         main = "12415 Dead Only")
+
+
+
+
+drug_l_12527=make_map_pdcc_ld(drug_tbl_clean %>% filter(ExpID %in% c("20171012_12527_20161206_1213")),"Dead")
+
+pheatmap(mat = drug_l_12527$mat, 
+         color = viridis(100), 
+         fontsize = 14, 
+         labels_col = "",
+         scale = "none",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         border_color = NA,
+         annotation_col  = drug_l_12527$annot,
+         annotation_colors = drug_ann_colors,
+         main = "12527 Dead Only")
+
+drug_l_12911=make_map_pdcc_ld(drug_tbl_clean %>% filter(ExpID %in% c( "20171016_12911_CRC_20170314_0321")),"Dead")
+
+pheatmap(mat = drug_l_12911$mat, 
+         color = viridis(100), 
+         fontsize = 14, 
+         labels_col = "",
+         scale = "none",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         border_color = NA,
+         annotation_col  = drug_l_12911$annot,
+         annotation_colors = drug_ann_colors,
+         main = "12911 Dead Only")
+
+```
+
+#Supplementary Fig 2A: Phenotypic and Morphological variance between patients treated with Media
+
+```{r violin_plot, echo=FALSE, message=FALSE, warning=FALSE, fig.height=11, fig.width=14}
+
+mlt_big_tbl <- big_tbl %>%  
+  filter(Day == 3) %>% 
+  mutate(Row = paste(Row, ExpID, sep = "_")) %>%
+  reshape2::melt() %>% 
+  filter(grepl("Region|Object", variable)) %>%
+  filter(Compound %in% c('Media', 'Control')) %>% 
+  mutate(variable = str_replace_all(variable, pattern = "Region.", replacement = ""))
+
+mlt_big_tbl_media <- fix_vars2(mlt_big_tbl)
+
+#cairo_ps(file="SF2A.ps",height=11.0,width=15.0)
+G <- ggp(mlt_big_tbl_media, aes(x = Compound, y = value, fill = Patient))
+G + geom_violin(trim = FALSE) + 
+  facet_wrap(~ variable, scales = "free_y") + 
+  labs(title = "Media", y = "Feature Values", x = "") +
+  scale_fill_manual(values=Patient_cols[c(  "12415" ,  "12527","12620","12737", "12911","13154" )]) +
+  theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+# dev.off()
+
+```
+
+
+#Supplementary Fig 2B: Phenotypic and Morphological variance between patients treated with STA
+```{r violin_plot_STA, echo=FALSE, message=FALSE, warning=FALSE, fig.height=11, fig.width=19}
+
+## plot features and patients.
+mlt_big_tbl <-  big_tbl %>%  
+  filter(Day == 3) %>%
+  mutate(Row = paste(Row, ExpID, sep = "_")) %>%
+  reshape2::melt() %>% filter(grepl("Region|Object", variable)) %>%
+  filter(Compound %in% c("STA")) %>%
+  mutate(variable = str_replace_all(variable, pattern = "Region.", replacement = ""))
+
+mlt_big_tbl_STA <- fix_vars2(mlt_big_tbl)
+
+#cairo_ps(file="SF2B.ps",height=11.0,width=15.0)
+
+G <- ggp(mlt_big_tbl_STA, aes(x = Compound, y = value, fill = Patient))
+  G + geom_violin(trim = FALSE) + 
+    facet_wrap(~ variable, scales = "free_y") + 
+    labs(title = "Staurosporine", y = "Feature Values", x = "") +
+    scale_fill_manual(values=Patient_cols[c(  "12415" ,  "12527","12620","12737", "12911","13154" )]) +
+    theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+#dev.off()
+
+### individual feature scatter plots. ###
+#
+#filter_tbl <- bind_rows(mlt_big_tbl_media, mlt_big_tbl_STA) %>% filter(variable %in% c("Profile 1/2", "Profile 2/2"))
+
+#G <- ggp(filter_tbl, aes(x = Patient, y = value, fill = LD))
+#G + geom_violin() + facet_grid(cols = vars(variable))
+```
+
+
+#Supplementary Fig 6A - Sankey Media 
+
+```{r Sankey_plots,echo=FALSE, message=FALSE, warning=FALSE, fig.height=7, fig.width=9 }
+
+# rename and select important columns and create unique ID
+sub_organoids <- tracked_organoids %>% 
+  rename(harmony_live = Tracked.Organoids.Selected.Selected...Live, 
+         harmony_dead = Tracked.Organoids.Selected.Selected...Dead, 
+         DRAQ_live_perObject = Tracked.Organoids.Selected.Selected...Number.of.Nuclei..DRAQ7....per.Object, 
+         DRAQ_dead = Tracked.Organoids.Selected.Selected...Dead..DRAQ7.., 
+         DRAQ_live = Tracked.Organoids.Selected.Selected...Live..DRAQ7.., 
+         DRAQ_INT = Tracked.Organoids.Selected.Selected...Intensity.Nucleus.Mean.Smoothed.Mean) %>% 
+  dplyr::select(-starts_with('Tracked')) %>% 
+  mutate(unique_ID = paste(Row, Column, Field, Object.ID, sep = '_')) %>%
+  mutate(Time..s. = round((((Time..s./60)/60)/24))) %>% dplyr::select(-Timepoint) %>% 
+  rename(Timepoint = Time..s.)
+
+# filter for organoids that are tracked across all timepoints
+surv_organoids <- sub_organoids %>% group_by(Row, Column, Field, Compound, Object.ID) %>% 
+  dplyr::summarise(count = n()) %>% filter(count >=5)
+
+# creat a survival status comun and label each organoid based on its L or dead call in harmony or by DRAQ
+surv_organoids_only <- inner_join(sub_organoids, surv_organoids) %>% mutate(surv_status = 0)
+surv_organoids_only$surv_status[surv_organoids_only$harmony_live == 1 & surv_organoids_only$DRAQ_live == 1] <- "L-ML_L-VD"
+surv_organoids_only$surv_status[surv_organoids_only$harmony_live == 1 & surv_organoids_only$DRAQ_live == 0] <- "L-ML_D-VD"
+surv_organoids_only$surv_status[surv_organoids_only$harmony_live == 0 & surv_organoids_only$DRAQ_live == 1] <- "D-ML_L-VD"
+surv_organoids_only$surv_status[surv_organoids_only$harmony_live == 0 & surv_organoids_only$DRAQ_live == 0] <- "D-ML_D-VD"
+
+
+# prepare df to be changed into a matrix
+organoids_mat <- surv_organoids_only  %>% mutate(surv_status = as.factor(surv_status)) %>% 
+  mutate(surv_status_num = as.integer(surv_status)) %>% filter(Timepoint != 2) %>% 
+  dplyr::select(unique_ID, Timepoint, surv_status, surv_status_num, DRAQ_INT,Compound) %>% unique() 
+
+
+
+sankey_media<-make_sankey(organoids_mat %>% filter(Compound == "Media"))
+sankey_sta<-make_sankey(organoids_mat %>% filter(Compound == "STA"))
+
+my_color <- 'd3.scaleOrdinal() .domain(["type_a", "type_b", "a", "b", "c", "d"]) .range(["#FAA43A","#5DA5DA", "#1E90FF", "#DAA520"])'
+
+
+# Make the Network
+sankeyNetwork(Links = sankey_media$links, Nodes = sankey_media$nodes,  
+              Source = "IDsource", Target = "IDtarget",
+              Value = "count", NodeID = "name", colourScale = my_color,
+              NodeGroup = "group", LinkGroup = "group", fontSize = 20, 
+              sinksRight = FALSE,fontFamily = "Helvetica")
+
+sankeyNetwork(Links = sankey_sta$links, Nodes = sankey_sta$nodes,  
+              Source = "IDsource", Target = "IDtarget",
+              Value = "count", NodeID = "name", colourScale = my_color,
+              NodeGroup = "group", LinkGroup = "group", fontSize = 20, 
+              sinksRight = FALSE,fontFamily = "Helvetica")
+
+
+
+```
+
+#Supplemantary Fig 6B  - Machine Leaning vs. Vital Dye 
+```{r MLvVD, echo=FALSE, message=FALSE, warning=FALSE, fig.height=7, fig.width=9 }
+
+sub_data_tbl <- subset_measurements(big_tbl)
+sub_data_tbl <- normalize_data(sub_data_tbl, metric = 'proportion')
+sub_data_tbl <- make_treatments(sub_data_tbl) 
+sub_data_tbl$Day <- factor(sub_data_tbl$Day)
+sub_data_tbl$Concentration <- factor(sub_data_tbl$Concentration)
+sub_data_tbl$Origin <- "Harmony"
+sub_data_tbl$Treatment[sub_data_tbl$Treatment == "STA"] <- "STA_5"
+
+#calculate average value of ATP = 0 background control and subract from all values
+avg_ATP1 <- ctg_1 %>% filter(Compound == 'ATP' & Concentration == 0)  %>% select(Signal) %>% summarise(mean=mean(Signal,na.rm=TRUE))
+day_data_D <- ctg_1 %>% mutate(Day = factor(3)) %>% mutate(Signal = Signal - avg_ATP1$mean) %>% filter(!Concentration == .25 | is.na(Concentration))
+
+avg_ATP2 <- ctg_2 %>% filter(Compound == 'ATP' & Concentration == 0)  %>% select(Signal) %>% summarise(mean=mean(Signal,na.rm=TRUE))
+day_data_E <- ctg_2 %>% mutate(Day = factor(7)) %>% mutate(Signal = Signal - avg_ATP2$mean)
+
+avg_ATP3 <- ctg_3 %>% filter(Compound == 'ATP' & Concentration == 0)  %>% select(Signal) %>% summarise(mean=mean(Signal,na.rm=TRUE))
+day_data_F <- ctg_3 %>% mutate(Day = factor(3)) %>% mutate(Signal = Signal - avg_ATP3$mean) 
+
+avg_ATP4 <- ctg_4 %>% filter(Compound == 'ATP' & Concentration == 0)  %>% select(Signal) %>% summarise(mean=mean(Signal,na.rm=TRUE))
+day_data_G <- ctg_4 %>% mutate(Day = factor(7)) %>% mutate(Signal = Signal - avg_ATP4$mean)
+
+total_data <- bind_rows(day_data_D, day_data_E, day_data_F, day_data_G)
+total_data <- make_treatments(total_data)
+total_data$Concentration <- factor(total_data$Concentration)
+total_data$Treatment[total_data$Treatment == 'media'] <- 'Media'
+total_data$Treatment[total_data$Treatment == 'STA'] <- 'STA_5'
+total_data$Compound[total_data$Compound == 'media'] <- 'Media'
+total_data$`Cell Type`<-as.factor("12737")
+total_data$Origin <- "CellTiterGlo"
+
+data_tbl_join <- inner_join(total_data, sub_data_tbl, by = c("Day", "Treatment", "Cell Type", "Concentration")) 
+
+summ_tbl <- data_tbl_join %>% group_by(Day, Treatment, `Cell Type`) %>% 
+  dplyr::summarise(mean_sig = mean(Signal), mean_PA = mean(live_mean) ) %>% 
+ group_by(Day) %>% mutate(norm_media = (mean_sig / mean_sig[Treatment == "Media"])) %>% 
+  filter(!Treatment %in% c('IRI_40', 'OXA_20', 'OXA_40', "Media", "IRI_0.74", "IRI_2.22", "IRI_6.66", "IRI_0.082","IRI_0.25")) %>% filter(Day %in% c(1,3,7)) 
+
+summ_tbl$Treatment <-  factor(summ_tbl$Treatment, labels = c("IRI 20µM", "IRI 60µM", "STA 5µM"))
+
+
+G <- ggp(summ_tbl, aes( x = norm_media, y = mean_PA, col = Treatment, shape = Day, group = Treatment))
+G  + stat_summary(fun.y = 'mean', size = 4, geom = "point") + 
+  geom_smooth(size = 1.5, method = 'glm', se = FALSE) +
+  labs(title = "",
+       x = "Mean Lumiescence Relative to Media (RLU)",
+       y = "Mean Percent Live organoids Relative to Media") +
+   scale_color_manual(values = c( "#ED873E", "#DF5C24", "#265DAB"), name="") + scale_x_continuous(limits = c(0,1)) + scale_y_continuous(limits = c(0,1))
+
+```
